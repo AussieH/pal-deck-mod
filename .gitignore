@@ -1,0 +1,14 @@
+state.json
+dump*.txt
+trace.txt
+input.txt
+input.txt.partial
+input.started
+names*.txt
+target*.txt
+target.started
+dev.txt
+*.zip
+*.log
+.DS_Store
+Thumbs.db
