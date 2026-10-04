@@ -1,5 +1,5 @@
 local MOD = "PalDeck"
-local VERSION = "1.1.0"
+local VERSION = "1.1.1"
 
 local STATE_CANDIDATES = {
   "Mods/NativeMods/UE4SS/Mods/" .. MOD .. "/state.json",
@@ -32,8 +32,17 @@ local function find(cls)
   return nil
 end
 
+local playerObj, playerLookAt = nil, -100
 local function player()
-  return find("PalPlayerCharacter")
+  if playerObj then
+    local ok, v = pcall(function() return playerObj:IsValid() end)
+    if ok and v then return playerObj end
+  end
+  playerObj = nil
+  if os.clock() - playerLookAt < 2 then return nil end
+  playerLookAt = os.clock()
+  playerObj = find("PalPlayerCharacter")
+  return playerObj
 end
 
 local dumpPath = nil
@@ -493,6 +502,7 @@ local function txt(v)
 end
 
 local cached = { party = nil, bases = {}, at = 0 }
+local baseCache, baseNext = {}, 1
 
 local function resolveContainers()
   local ok = cached.party and safe(function() return cached.party:IsValid() end, false)
@@ -500,22 +510,33 @@ local function resolveContainers()
     if not safe(function() return b:IsValid() end, false) then ok = false end
   end
 
-  if ok and #cached.bases > 0 and os.time() - cached.at < 30 then return end
+  local age = os.time() - cached.at
+  if ok and age < 30 then return end
+  if not ok and age < 3 then return end
 
+  local before = cached.bases
   cached = { party = nil, bases = {}, at = os.time() }
   local all = safe(function() return FindAllOf("PalIndividualCharacterContainer") end, nil)
-  if not all then return end
-  for _, c in ipairs(all) do
-    if c and safe(function() return c:IsValid() end, false) then
-      local full = nameOf(c)
-      if full:find("PalPlayerController", 1, true) then
-        cached.party = c
-      elseif full:find("PalGameStateInGame", 1, true) then
-        cached.bases[#cached.bases + 1] = c
+  if all then
+    for _, c in ipairs(all) do
+      if c and safe(function() return c:IsValid() end, false) then
+        local full = nameOf(c)
+        if full:find("PalPlayerController", 1, true) then
+          cached.party = c
+        elseif full:find("PalGameStateInGame", 1, true) then
+          cached.bases[#cached.bases + 1] = c
+        end
       end
-
     end
   end
+  local same = #before == #cached.bases
+  local function addr(o) return safe(function() return o:GetAddress() end, nil) end
+  for i = 1, #cached.bases do
+    if not same then break end
+    local a, b = addr(before[i]), addr(cached.bases[i])
+    if not a or a ~= b then same = false end
+  end
+  if not same then baseCache, baseNext = {}, 1 end
 end
 
 local function palInfo(param)
@@ -629,18 +650,45 @@ local function containerPals(c, limit)
   return items
 end
 
+local playerParam, playerParamAt = nil, -100
 local function playerInfo()
-  local all = safe(function() return FindAllOf("PalIndividualCharacterParameter") end, nil)
-  if not all then return nil end
-  for _, p in ipairs(all) do
-
-    local isPlayer = p and safe(function() return p:IsValid() and p.SaveParameter.IsPlayer == true end, false)
-    if isPlayer then return palInfo(p) end
+  if not (playerParam and safe(function() return playerParam:IsValid() end, false)) then
+    playerParam = nil
+    if os.clock() - playerParamAt < 10 then return nil end
+    playerParamAt = os.clock()
+    local all = safe(function() return FindAllOf("PalIndividualCharacterParameter") end, nil)
+    if not all then return nil end
+    for _, p in ipairs(all) do
+      if p and safe(function() return p:IsValid() and p.SaveParameter.IsPlayer == true end, false) then playerParam = p; break end
+    end
+    if not playerParam then return nil end
   end
-  return nil
+  return palInfo(playerParam)
+end
+
+local prof = { n = 0, sum = {}, max = {}, at = os.time() }
+local profLast = 0
+local function mark(name)
+  local now = os.clock()
+  local ms = (now - profLast) * 1000
+  profLast = now
+  prof.sum[name] = (prof.sum[name] or 0) + ms
+  if ms > (prof.max[name] or 0) then prof.max[name] = ms end
+end
+
+local function profReport()
+  if os.time() - prof.at < 60 or prof.n == 0 then return end
+  local out = {}
+  for _, k in ipairs({ "player", "party", "bases", "target", "world", "write", "total" }) do
+    if prof.sum[k] then out[#out + 1] = string.format("%s %.1f/%.1f", k, prof.sum[k] / prof.n, prof.max[k]) end
+  end
+  log("tick ms (average/worst over " .. prof.n .. "): " .. table.concat(out, ", "))
+  prof = { n = 0, sum = {}, max = {}, at = os.time() }
 end
 
 local function writeState()
+  local started = os.clock()
+  profLast = started
   local p = player()
   local parts = {
 
@@ -658,15 +706,20 @@ local function writeState()
     resolveContainers()
 
     parts[#parts + 1] = '"player":' .. palJson(playerInfo())
+    mark("player")
 
     local party = containerPals(cached.party, 5)
     local partyJson = {}
     for i = 1, 5 do partyJson[i] = palJson(party[i]) end
     parts[#parts + 1] = '"party":[' .. table.concat(partyJson, ",") .. "]"
+    mark("party")
 
-    local baseJson = {}
-    for bi, c in ipairs(cached.bases) do
-      if bi > 6 then break end
+    local nBases = math.min(#cached.bases, 6)
+    for bi = nBases + 1, #baseCache do baseCache[bi] = nil end
+    for step = 1, nBases do
+      local bi = ((baseNext + step - 2) % nBases) + 1
+      local c = cached.bases[bi]
+      if baseCache[bi] and step > 1 then break end
       local workers = containerPals(c, 18)
       local n, hungry, lowSanity, sick, rare = 0, 0, 0, 0, 0
       for _, w in ipairs(workers) do
@@ -681,20 +734,26 @@ local function writeState()
 
       local list = {}
       for _, w in ipairs(workers) do if w then list[#list + 1] = palJson(w) end end
-      baseJson[#baseJson + 1] = string.format(
+      baseCache[bi] = string.format(
         '{"workers":%d,"hungry":%d,"lowSanity":%d,"sick":%d,"rare":%d,"list":[%s]}', n, hungry, lowSanity, sick, rare, table.concat(list, ","))
     end
+    if nBases > 0 then baseNext = (baseNext % nBases) + 1 end
+    local baseJson = {}
+    for bi = 1, nBases do baseJson[bi] = baseCache[bi] or '{"workers":0,"hungry":0,"lowSanity":0,"sick":0,"rare":0,"list":[]}' end
     parts[#parts + 1] = '"bases":[' .. table.concat(baseJson, ",") .. "]"
+    mark("bases")
 
     local okT, tj = pcall(function() return lookingAtJson and lookingAtJson() or "null" end)
     parts[#parts + 1] = '"target":' .. (okT and tj or "null")
 
     if not okT then parts[#parts + 1] = '"targetError":' .. str(tostring(tj)) end
+    mark("target")
 
     local okW, wj = pcall(function() return worldJson and worldJson() or "null" end)
     parts[#parts + 1] = '"world":' .. (okW and wj or "null")
     local okP, pj = pcall(function() return weaponJson and weaponJson() or "null" end)
     parts[#parts + 1] = '"weapon":' .. (okP and pj or "null")
+    mark("world")
   end
 
   parts[#parts + 1] = '"end":true'
@@ -712,6 +771,14 @@ local function writeState()
   if statePath then
     local f = io.open(statePath, "w")
     if f then f:write(body); f:close() end
+    if p then
+      mark("write")
+      local total = (os.clock() - started) * 1000
+      prof.sum.total = (prof.sum.total or 0) + total
+      if total > (prof.max.total or 0) then prof.max.total = total end
+      prof.n = prof.n + 1
+      profReport()
+    end
     return
   end
 
@@ -1010,12 +1077,14 @@ local function vec3(v)
   return nil
 end
 
-local myShooter = nil
+local myShooter, shooterAt = nil, -100
 local function camera()
   local p = player()
   if not p then return nil end
   if not valid(myShooter) then
     myShooter = nil
+    if os.clock() - shooterAt < 5 then return nil end
+    shooterAt = os.clock()
     local me = safe(function() return p:GetFName():ToString() end, nil)
     for _, c in ipairs(safe(function() return FindAllOf("PalShooterComponent") end, nil) or {}) do
       if me and valid(c) and nameOf(c):find(me, 1, true) then myShooter = c; break end
@@ -1049,8 +1118,10 @@ function worldJson()
     }
   end
   if not (timeFns.hour and timeFns.minute) then return "null" end
-  if not valid(timeMgr) or os.time() - timeAt > 30 then
-    timeMgr, timeAt = nil, os.time()
+  if not valid(timeMgr) then
+    timeMgr = nil
+    if os.time() - timeAt < 5 then return "null" end
+    timeAt = os.time()
     for _, t in ipairs(safe(function() return FindAllOf("PalTimeManager") end, nil) or {}) do
       if valid(t) and not nameOf(t):find("Default__", 1, true) then timeMgr = t; break end
     end
@@ -1113,11 +1184,16 @@ function statusPointsOf(sp)
   return list
 end
 
+local monsters, monstersAt = nil, -100
+
 function lookingAtJson()
   local cam, fwd = camera()
   if not cam then return "null" end
   local best, bestScore, bestDist = nil, nil, nil
-  for _, a in ipairs(safe(function() return FindAllOf("PalMonsterCharacter") end, nil) or {}) do
+  if not monsters or os.clock() - monstersAt > 3 then
+    monsters, monstersAt = safe(function() return FindAllOf("PalMonsterCharacter") end, nil) or {}, os.clock()
+  end
+  for _, a in ipairs(monsters) do
     if valid(a) then
       local rc = safe(function() return a.RootComponent end, nil)
 

@@ -32,7 +32,8 @@ off until you turn it back on.
 
 ## The state files
 
-The same JSON, rewritten whole once a second, goes to two places:
+The same JSON, rewritten whole once a second, goes to two places. Base workers are refreshed one base per second and
+the Pal in view from a list renewed every 3 seconds, which keeps each update short.
 
 - **In the game folder:** `Mods\NativeMods\UE4SS\Mods\PalDeck\state.json` (the Steam Workshop UE4SS layout) or
   `Pal\Binaries\Win64\ue4ss\Mods\PalDeck\state.json` (a hand install), for the Stream Deck plugin.
@@ -71,6 +72,8 @@ Pal Deck installs it for you: **Install the mod** in any Pal Deck key's settings
 4. Add `PalDeck : 1` to the `mods.txt` in that `Mods` folder, above the `Keybinds` line (the `enabled.txt` in the
    folder does the same on builds that use it).
 5. Start the game. The UE4SS log gets a `[PalDeck] loaded` line, then the state file paths it writes to.
+   Once a minute in a world it also logs `tick ms`: how long each part of the once-a-second update took on the
+   game thread (average and worst), so a stutter can be traced to its part.
 
 Do not give the mod a Palworld ManagedMods entry (`Info.json`, `InstallManifest.json`): the game's mod manager removes
 packages it cannot match to a Workshop subscription, and it loads fine from `mods.txt`.
